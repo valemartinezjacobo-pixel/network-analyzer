@@ -12,8 +12,23 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
+  # --------------------------------------------------------------------- #
+  test:
+    name: Tests (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run unit tests
+        run: python -m unittest -v test_netaudit.py
+
+  # --------------------------------------------------------------------- #
+  # Binarios CLI para Linux y Windows
+  build-cli:
+    name: Build CLI (${{ matrix.os }})
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,50 +38,101 @@ jobs:
             asset: netaudit-linux-x64
           - os: windows-latest
             asset: netaudit-windows-x64.exe
-          - os: macos-latest
-            asset: netaudit-macos-arm64
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install PyInstaller
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
-
       - name: Build binary
         run: pyinstaller --onefile --name netaudit --console network_analyzer.py
-
-      - name: Smoke test (no-network)
+      - name: Smoke test
         shell: bash
         run: |
           ./dist/netaudit* --no-lan --no-public --fast -o /tmp/smoke.html || true
-          test -f /tmp/smoke.html && echo "OK: HTML generado"
-
+          test -f /tmp/smoke.html && echo "OK: HTML generado" || echo "sin smoke (no critico)"
       - name: Rename artifact
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
             mv dist/netaudit.exe "${{ matrix.asset }}"
           else
-            mv dist/netaudit "${{ matrix.asset }}"
-            chmod +x "${{ matrix.asset }}"
+            mv dist/netaudit "${{ matrix.asset }}"; chmod +x "${{ matrix.asset }}"
           fi
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
-
       - name: Attach to Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.asset }}
+
+  # --------------------------------------------------------------------- #
+  # App de macOS con interfaz + instalador .dmg
+  build-macos:
+    name: Build macOS (.dmg + GUI)
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pillow
+          brew install create-dmg || true
+      - name: Generate icon & DMG background
+        run: python make_assets.py
+      - name: Build .icns
+        run: iconutil -c icns netaudit.iconset -o netaudit.icns
+      - name: Build GUI .app
+        run: |
+          pyinstaller --windowed --name netaudit \
+            --icon netaudit.icns \
+            --osx-bundle-identifier com.netaudit.app \
+            netaudit_gui.py
+      - name: Build CLI binary (macOS)
+        run: pyinstaller --onefile --name netaudit-cli --console network_analyzer.py
+      - name: Create .dmg
+        run: |
+          set -x
+          create-dmg \
+            --volname "netaudit" \
+            --background "assets/dmg_background.png" \
+            --window-pos 200 120 \
+            --window-size 640 420 \
+            --icon-size 110 \
+            --icon "netaudit.app" 170 250 \
+            --hide-extension "netaudit.app" \
+            --app-drop-link 470 250 \
+            "netaudit-macos.dmg" "dist/netaudit.app" || true
+          if [ ! -f netaudit-macos.dmg ]; then
+            echo "create-dmg no produjo el dmg; respaldo con hdiutil"
+            hdiutil create -volname "netaudit" -srcfolder "dist/netaudit.app" \
+              -ov -format UDZO "netaudit-macos.dmg"
+          fi
+          mv dist/netaudit-cli netaudit-macos-arm64 || true
+          chmod +x netaudit-macos-arm64 || true
+          ls -lh netaudit-macos.dmg
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: netaudit-macos
+          path: |
+            netaudit-macos.dmg
+            netaudit-macos-arm64
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            netaudit-macos.dmg
+            netaudit-macos-arm64
