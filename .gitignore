@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Salidas del propio programa
+network_report.html
+*.report.html
+*.report.json
+
+# SO
+.DS_Store
+Thumbs.db
