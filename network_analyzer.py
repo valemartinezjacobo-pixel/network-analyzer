@@ -47,6 +47,14 @@ IS_WIN = platform.system().lower().startswith("win")
 IS_MAC = platform.system().lower() == "darwin"
 IS_LINUX = platform.system().lower() == "linux"
 
+# Salida UTF-8 robusta: evita UnicodeEncodeError en consolas Windows (cp1252)
+# al imprimir el banner y símbolos como ✔ / ⚠ / caracteres de caja.
+for _stream in ("stdout", "stderr"):
+    try:
+        getattr(sys, _stream).reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # --------------------------------------------------------------------------- #
 # Utilidades                                                                   #
 # --------------------------------------------------------------------------- #
