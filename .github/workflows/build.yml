@@ -1,0 +1,72 @@
+name: Build multiplataforma
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: netaudit-linux-x64
+          - os: windows-latest
+            asset: netaudit-windows-x64.exe
+          - os: macos-latest
+            asset: netaudit-macos-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Build binary
+        run: pyinstaller --onefile --name netaudit --console network_analyzer.py
+
+      - name: Smoke test (no-network)
+        shell: bash
+        run: |
+          ./dist/netaudit* --no-lan --no-public --fast -o /tmp/smoke.html || true
+          test -f /tmp/smoke.html && echo "OK: HTML generado"
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            mv dist/netaudit.exe "${{ matrix.asset }}"
+          else
+            mv dist/netaudit "${{ matrix.asset }}"
+            chmod +x "${{ matrix.asset }}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
