@@ -39,7 +39,7 @@ redes ajenas puede ser ilegal en tu jurisdicción.
 ================================================================================
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 import argparse
 import concurrent.futures
@@ -63,6 +63,12 @@ import uuid
 IS_WIN = platform.system().lower().startswith("win")
 IS_MAC = platform.system().lower() == "darwin"
 IS_LINUX = platform.system().lower() == "linux"
+
+# Sniffer (mini-Wireshark). Import explícito para que PyInstaller lo empaquete.
+try:
+    import netaudit_sniffer
+except Exception:
+    netaudit_sniffer = None
 
 # Salida UTF-8 robusta: evita UnicodeEncodeError en consolas Windows (cp1252).
 for _stream in ("stdout", "stderr"):
@@ -1275,6 +1281,77 @@ bar('cDns',{chart_dns_labels},{chart_dns_data},'#ffb454');
     return html
 
 # --------------------------------------------------------------------------- #
+# Extras tipo "Advanced IP Scanner": Wake-on-LAN, SMB, acciones rápidas       #
+# --------------------------------------------------------------------------- #
+
+def wake_on_lan(mac, broadcast="255.255.255.255", port=9):
+    """Envía un paquete mágico Wake-on-LAN a la MAC indicada."""
+    clean = re.sub(r"[^0-9a-fA-F]", "", mac)
+    if len(clean) != 12:
+        raise ValueError("MAC inválida")
+    data = bytes.fromhex("FF" * 6 + clean * 16)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.sendto(data, (broadcast, port))
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def smb_shares(ip, timeout=4):
+    """Lista carpetas compartidas SMB del host (best-effort, según el sistema)."""
+    shares = []
+    try:
+        if IS_WIN:
+            out = run(["net", "view", f"\\\\{ip}"], timeout=timeout)
+            for line in out.splitlines():
+                m = re.match(r"^(\S+)\s+Disk", line)
+                if m:
+                    shares.append(m.group(1))
+        elif IS_MAC and have("smbutil"):
+            out = run(["smbutil", "view", "-g", f"//{ip}"], timeout=timeout)
+            for line in out.splitlines():
+                m = re.match(r"^(\S+)\s+Disk", line.strip())
+                if m and m.group(1).lower() not in ("share", "-----"):
+                    shares.append(m.group(1))
+        elif have("smbclient"):
+            out = run(["smbclient", "-L", f"//{ip}", "-N", "-g"], timeout=timeout)
+            for line in out.splitlines():
+                if line.startswith("Disk|"):
+                    shares.append(line.split("|")[1])
+    except Exception:
+        pass
+    return shares
+
+
+def host_actions(host):
+    """Devuelve las acciones/URLs disponibles para un host según sus puertos."""
+    ip = host["ip"]
+    ports = {p["port"] for p in host.get("ports", [])}
+    actions = []
+    if 80 in ports or 8080 in ports:
+        actions.append(("Abrir web (HTTP)", f"http://{ip}"))
+    if 443 in ports or 8443 in ports:
+        actions.append(("Abrir web (HTTPS)", f"https://{ip}"))
+    if 21 in ports:
+        actions.append(("FTP", f"ftp://{ip}"))
+    if 445 in ports or 139 in ports:
+        actions.append(("Carpetas compartidas (SMB)", f"smb://{ip}"))
+    if 3389 in ports:
+        actions.append(("Escritorio remoto (RDP)", f"rdp://{ip}"))
+    if 22 in ports:
+        actions.append(("SSH", f"ssh://{ip}"))
+    if 5900 in ports:
+        actions.append(("VNC", f"vnc://{ip}"))
+    actions.append(("Ping", ip))
+    if host.get("mac"):
+        actions.append(("Wake-on-LAN", host["mac"]))
+    return actions
+
+
+# --------------------------------------------------------------------------- #
 # API reutilizable (la usa también la GUI)                                    #
 # --------------------------------------------------------------------------- #
 
@@ -1348,6 +1425,52 @@ def analyze(opts, status=None):
 
 
 # --------------------------------------------------------------------------- #
+# Captura de paquetes por CLI (mini-Wireshark)                                #
+# --------------------------------------------------------------------------- #
+
+def run_capture_cli(args):
+    sniff = netaudit_sniffer
+    if sniff is None:
+        try:
+            import netaudit_sniffer as sniff
+        except Exception as e:
+            print(C.r(f"No se pudo cargar el módulo sniffer: {e}"))
+            return
+    if args.read_pcap:
+        section(f"Leyendo {args.read_pcap}")
+        pkts = sniff.read_pcap(args.read_pcap)
+    else:
+        ok, why = sniff.can_capture()
+        if not ok:
+            print(C.r(f"\n   No se puede capturar: {why}"))
+            print("   Sugerencia: ejecútalo con sudo (Linux/macOS).\n")
+            return
+        section(f"Captura de paquetes ({args.capture}) · {why}")
+        print(C.dim("   Necesita privilegios de administrador. Ctrl+C para parar.\n"))
+        hdr = f"   {'No.':>4} {'Tiempo':>12}  {'Origen':>21} → {'Destino':<21} {'Proto':<6}{'Long':>6}  Info"
+        print(C.dim(hdr))
+        def show(p):
+            import datetime as _dt
+            t = _dt.datetime.fromtimestamp(p['time']).strftime("%H:%M:%S.%f")[:-3]
+            print(f"   {p['no']:>4} {t:>12}  {p['src']:>21} → {p['dst']:<21} {p['proto']:<6}{p['length']:>6}  {p['info']}")
+        try:
+            pkts = sniff.capture(args.capture or 50, args.iface, args.filter, on_packet=show)
+        except PermissionError as e:
+            print(C.r(f"\n   {e}\n")); return
+        except Exception as e:
+            print(C.r(f"\n   Error de captura: {e}\n")); return
+
+    out = args.output if args.output != "network_report.html" else "capture_report.html"
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(sniff.build_capture_html(pkts))
+    print(f"\n   {len(pkts)} paquetes · Reporte HTML: {os.path.abspath(out)}")
+    if args.pcap:
+        sniff.write_pcap(args.pcap, pkts)
+        print(f"   pcap: {os.path.abspath(args.pcap)}  (ábrelo en Wireshark)")
+    print(C.g("   Listo. ✔\n"))
+
+
+# --------------------------------------------------------------------------- #
 # Orquestador (CLI)                                                           #
 # --------------------------------------------------------------------------- #
 
@@ -1369,12 +1492,27 @@ def main():
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"))
     ap.add_argument("--version", action="version", version=f"netaudit {__version__}")
+    # Captura de paquetes (mini-Wireshark) y Wake-on-LAN (Advanced IP Scanner)
+    ap.add_argument("--capture", type=int, metavar="N", help="captura N paquetes (necesita sudo)")
+    ap.add_argument("--iface", default=None, help="interfaz para la captura")
+    ap.add_argument("--filter", default=None, help="filtro BPF para la captura, ej 'tcp port 443'")
+    ap.add_argument("--pcap", default=None, help="guarda la captura en un .pcap (Wireshark)")
+    ap.add_argument("--read-pcap", default=None, help="lee y diseca un .pcap existente")
+    ap.add_argument("--wol", default=None, metavar="MAC", help="envía Wake-on-LAN a una MAC")
     args = ap.parse_args()
 
     if args.no_color:
         C.enabled = False
     if args.compare:
         compare_reports(args.compare[0], args.compare[1])
+        return
+    if args.wol:
+        ok = wake_on_lan(args.wol)
+        print(C.g(f"   Wake-on-LAN enviado a {args.wol}") if ok
+              else C.r(f"   No se pudo enviar WoL a {args.wol}"))
+        return
+    if args.capture is not None or args.read_pcap:
+        run_capture_cli(args)
         return
 
     print(C.b(r"""

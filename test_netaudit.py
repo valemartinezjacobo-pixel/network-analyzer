@@ -82,5 +82,80 @@ class TestHTML(unittest.TestCase):
         self.assertIn("netaudit", html)
 
 
+class TestSniffer(unittest.TestCase):
+    @staticmethod
+    def _eth(dst, src, etype, payload):
+        import struct
+        return (bytes.fromhex(dst.replace(":", "")) + bytes.fromhex(src.replace(":", "")) +
+                struct.pack("!H", etype) + payload)
+
+    def test_dissect_tcp(self):
+        import struct, socket
+        import netaudit_sniffer as sn
+        tcp = struct.pack("!HHIIBBHHH", 52344, 443, 1000, 0, 0x50, 0x02, 64240, 0, 0)
+        iph = (struct.pack("!BBHHHBBH", 0x45, 0, 20 + len(tcp), 1, 0, 64, 6, 0) +
+               socket.inet_aton("192.168.1.10") + socket.inet_aton("93.184.216.34"))
+        fr = self._eth("aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66", 0x0800, iph + tcp)
+        p = sn.parse_packet(fr, number=1)
+        self.assertEqual(p["proto"], "TCP")
+        self.assertEqual(p["dst"], "93.184.216.34")
+        self.assertIn("SYN", p["info"])
+
+    def test_dissect_dns_and_arp(self):
+        import struct, socket
+        import netaudit_sniffer as sn
+        dnsq = (struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0) +
+                bytes([7]) + b"example" + bytes([3]) + b"com" + bytes([0]) + struct.pack("!HH", 1, 1))
+        udp = struct.pack("!HHHH", 51000, 53, 8 + len(dnsq), 0) + dnsq
+        iph = (struct.pack("!BBHHHBBH", 0x45, 0, 20 + len(udp), 2, 0, 64, 17, 0) +
+               socket.inet_aton("192.168.1.10") + socket.inet_aton("1.1.1.1"))
+        fr = self._eth("aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66", 0x0800, iph + udp)
+        p = sn.parse_packet(fr, number=2)
+        self.assertIn("example.com", p["info"])
+        arp = (struct.pack("!HHBBH", 1, 0x0800, 6, 4, 1) + bytes.fromhex("112233445566") +
+               socket.inet_aton("192.168.1.5") + bytes(6) + socket.inet_aton("192.168.1.1"))
+        fr2 = self._eth("ff:ff:ff:ff:ff:ff", "11:22:33:44:55:66", 0x0806, arp)
+        p2 = sn.parse_packet(fr2, number=3)
+        self.assertEqual(p2["proto"], "ARP")
+        self.assertIn("Who has 192.168.1.1", p2["info"])
+
+    def test_pcap_roundtrip(self):
+        import struct, socket, tempfile, os
+        import netaudit_sniffer as sn
+        tcp = struct.pack("!HHIIBBHHH", 1, 80, 0, 0, 0x50, 0x02, 0, 0, 0)
+        iph = (struct.pack("!BBHHHBBH", 0x45, 0, 20 + len(tcp), 1, 0, 64, 6, 0) +
+               socket.inet_aton("10.0.0.1") + socket.inet_aton("10.0.0.2"))
+        fr = self._eth("aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66", 0x0800, iph + tcp)
+        p = sn.parse_packet(fr, number=1); p["raw"] = fr
+        tf = tempfile.mktemp(suffix=".pcap")
+        sn.write_pcap(tf, [p])
+        rd = sn.read_pcap(tf)
+        os.unlink(tf)
+        self.assertEqual(len(rd), 1)
+        self.assertEqual(rd[0]["proto"], "TCP")
+
+    def test_capture_html(self):
+        import netaudit_sniffer as sn
+        html = sn.build_capture_html([{"no": 1, "time": 1.5, "src": "a", "dst": "b",
+                                       "proto": "TCP", "length": 60, "info": "x", "hex": "00"}])
+        self.assertTrue(html.startswith("<!DOCTYPE"))
+
+
+class TestScannerExtras(unittest.TestCase):
+    def test_wol_magic_packet(self):
+        import re
+        clean = re.sub(r"[^0-9a-fA-F]", "", "aa:bb:cc:dd:ee:ff")
+        magic = bytes.fromhex("FF" * 6 + clean * 16)
+        self.assertEqual(len(magic), 102)
+        self.assertEqual(magic[:6], b"\xff" * 6)
+
+    def test_host_actions(self):
+        h = {"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff",
+             "ports": [{"port": 80, "service": "HTTP"}, {"port": 3389, "service": "RDP"}]}
+        names = [a[0] for a in na.host_actions(h)]
+        self.assertTrue(any("HTTP" in n for n in names))
+        self.assertTrue(any("Wake" in n for n in names))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

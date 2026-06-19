@@ -69,6 +69,26 @@ Genera `network_report.html`. Ábrelo en el navegador.
 El **dashboard HTML** incluye gráficas (Chart.js), tablas filtrables/ordenables,
 mapa de geolocalización, gauge de seguridad y exportación a CSV desde el navegador.
 
+## Herramientas incluidas (la app tiene 3 modos)
+
+La aplicación de escritorio reúne tres herramientas:
+
+1. **Análisis de red** — la auditoría completa descrita arriba + dashboard HTML.
+2. **Escáner de red** (estilo *Advanced IP Scanner*) — descubre los hosts de la LAN en una tabla en vivo (IP, nombre, MAC, fabricante, SO, puertos) con **Wake-on-LAN**, detección de carpetas compartidas **SMB** y acciones rápidas (abrir web/FTP/RDP/VNC).
+3. **Captura de paquetes** (estilo *Wireshark*) — sniffer con disector **Ethernet/ARP/IPv4/IPv6/TCP/UDP/ICMP/DNS**, tabla en vivo, vista de detalle por capas + hex, y exportación a **`.pcap`** (abrible en el Wireshark real).
+
+### Captura desde la terminal
+
+```bash
+sudo netaudit --capture 200 --pcap captura.pcap   # captura 200 paquetes y los guarda
+sudo netaudit --capture 100 --filter "tcp port 443"
+netaudit --read-pcap captura.pcap                  # diseca un pcap existente (sin sudo)
+netaudit --wol AA:BB:CC:DD:EE:FF                   # Wake-on-LAN
+```
+
+> La captura en vivo necesita permisos de administrador (sudo/root), igual que
+> Wireshark. En Linux usa raw sockets nativos; en macOS, el `tcpdump` del sistema.
+
 ## Docker
 
 ```bash
