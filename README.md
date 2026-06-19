@@ -84,10 +84,21 @@ sudo netaudit --capture 200 --pcap captura.pcap   # captura 200 paquetes y los g
 sudo netaudit --capture 100 --filter "tcp port 443"
 netaudit --read-pcap captura.pcap                  # diseca un pcap existente (sin sudo)
 netaudit --wol AA:BB:CC:DD:EE:FF                   # Wake-on-LAN
+netaudit --pdf informe.pdf                         # exporta la auditoría a PDF
+sudo netaudit --capture 200 --pdf captura.pdf      # exporta la captura a PDF
 ```
 
-> La captura en vivo necesita permisos de administrador (sudo/root), igual que
-> Wireshark. En Linux usa raw sockets nativos; en macOS, el `tcpdump` del sistema.
+### Exportar a PDF
+
+Los tres modos exportan a **PDF** (sin programas externos): en la app, los botones
+*Exportar a PDF* (auditoría), *PDF* (escáner de red) y *PDF* (captura de paquetes);
+desde la terminal, con el flag `--pdf`.
+
+> La captura en vivo necesita permisos de administrador, igual que Wireshark.
+> **En la app de macOS no hace falta la Terminal:** al pulsar *Iniciar* aparece el
+> diálogo nativo de macOS (contraseña o Touch ID, un solo botón) y la captura
+> arranca. El análisis y el escáner de red no piden nada. En Linux, la app usa
+> `pkexec` (diálogo gráfico) o raw sockets si ya eres root.
 
 ## Docker
 

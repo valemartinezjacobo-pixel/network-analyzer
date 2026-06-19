@@ -25,6 +25,7 @@ from tkinter import ttk, filedialog, messagebox
 
 import network_analyzer as na
 import netaudit_sniffer as sniff
+import netaudit_pdf as pdfx
 
 # ---- Paleta ---- #
 BG, PANEL, PANEL2, LINE = "#0b0f17", "#121826", "#0e1420", "#1f2a3d"
@@ -255,10 +256,24 @@ class App:
         findings = sec.get("findings", [])
         cv.create_text(W/2, 432, fill=ACC if not findings else WARN, font=self.f_small,
                        text="Sin riesgos detectados 🎉" if not findings else f"{len(findings)} hallazgo(s) — revisa el informe")
-        RoundButton(cv, W/2-130, 470, 260, 50, "Ver informe completo", self.f_btn, ACC, "#06231a",
+        RoundButton(cv, W/2-130, 458, 260, 48, "Ver informe completo", self.f_btn, ACC, "#06231a",
                     command=lambda: webbrowser.open("file://"+os.path.abspath(self.report_path)))
-        RoundButton(cv, W/2-130, 532, 260, 42, "Volver al inicio", self.f_small, PANEL, ACC2,
+        RoundButton(cv, W/2-130, 514, 260, 42, "Exportar a PDF", self.f_small, PANEL, ACC,
+                    command=self.export_audit_pdf, radius=12)
+        RoundButton(cv, W/2-130, 564, 260, 40, "Volver al inicio", self.f_small, PANEL, ACC2,
                     command=self.show_home, radius=12)
+
+    def export_audit_pdf(self):
+        path = filedialog.asksaveasfilename(defaultextension=".pdf",
+                                            filetypes=[("PDF", "*.pdf")],
+                                            initialfile="netaudit_auditoria.pdf")
+        if not path:
+            return
+        try:
+            pdfx.pdf_audit_report(self.data, path)
+            messagebox.showinfo("PDF", f"Informe guardado en:\n{path}")
+        except Exception as e:
+            messagebox.showerror("PDF", f"No se pudo crear el PDF:\n{e}")
 
     # =================================================================== #
     # ESCÁNER DE RED (Advanced IP Scanner)
@@ -278,6 +293,8 @@ class App:
                   relief="flat", font=self.f_small, bd=0, padx=12, pady=4).pack(side="right", padx=6)
         tk.Button(bar, text="Abrir", command=self._scan_open, bg=PANEL, fg=ACC,
                   relief="flat", font=self.f_small, bd=0, padx=12, pady=4).pack(side="right")
+        tk.Button(bar, text="PDF", command=self._scan_pdf, bg=PANEL, fg=ACC,
+                  relief="flat", font=self.f_small, bd=0, padx=12, pady=4).pack(side="right", padx=6)
 
         cols = ("ip", "host", "mac", "vendor", "os", "ports")
         frame = tk.Frame(self.root, bg=BG); frame.pack(fill="both", expand=True, padx=16, pady=10)
@@ -387,6 +404,22 @@ class App:
         messagebox.showinfo("Wake-on-LAN",
                             f"Paquete mágico enviado a {h['mac']}" if ok else "No se pudo enviar.")
 
+    def _scan_pdf(self):
+        hosts = [rec[1] for rec in self._scan_rows.values()]
+        if not hosts:
+            messagebox.showinfo("PDF", "No hay dispositivos que exportar.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".pdf",
+                                            filetypes=[("PDF", "*.pdf")],
+                                            initialfile="netaudit_escaner.pdf")
+        if not path:
+            return
+        try:
+            pdfx.pdf_scan_report(hosts, path)
+            messagebox.showinfo("PDF", f"Guardado en:\n{path}")
+        except Exception as e:
+            messagebox.showerror("PDF", f"No se pudo crear el PDF:\n{e}")
+
     def _scan_open(self):
         h = self._selected_host()
         if not h:
@@ -409,8 +442,14 @@ class App:
         tk.Button(top, text="← Inicio", command=self.show_home, bg=PANEL, fg=ACC2,
                   relief="flat", font=self.f_small, bd=0).pack(side="right")
         bar = tk.Frame(self.root, bg=BG); bar.pack(fill="x", padx=16)
-        ok, why = sniff.can_capture()
-        self.snf_status = tk.Label(bar, text=f"Backend: {why}", bg=BG,
+        self.priv = sniff.privileged_backend()
+        if self.priv == "root":
+            txt, ok = "Listo · captura directa", True
+        elif self.priv in ("macos", "linux-pkexec"):
+            txt, ok = "Pulsa ▶ Iniciar (pedirá tu contraseña una vez)", True
+        else:
+            txt, ok = "Sin backend de captura (usa: sudo netaudit --capture)", False
+        self.snf_status = tk.Label(bar, text=txt, bg=BG,
                                    fg=ACC if ok else WARN, font=self.f_mono)
         self.snf_status.pack(side="left")
         self.btn_start = tk.Button(bar, text="▶ Iniciar", command=self._snf_start, bg=ACC,
@@ -421,6 +460,8 @@ class App:
         self.btn_stop.pack(side="right", padx=6)
         tk.Button(bar, text="Guardar .pcap", command=self._snf_save, bg=PANEL, fg=ACC2,
                   relief="flat", font=self.f_small, bd=0, padx=12, pady=4).pack(side="right")
+        tk.Button(bar, text="PDF", command=self._snf_pdf, bg=PANEL, fg=ACC,
+                  relief="flat", font=self.f_small, bd=0, padx=12, pady=4).pack(side="right", padx=6)
 
         cols = ("no", "time", "src", "dst", "proto", "len", "info")
         frame = tk.Frame(self.root, bg=BG); frame.pack(fill="both", expand=True, padx=16, pady=(10, 4))
@@ -441,27 +482,40 @@ class App:
         self.capture_pkts = []
         if not ok:
             self.btn_start.config(state="disabled")
-            messagebox.showinfo("Captura", f"La captura necesita privilegios: {why}.\n"
-                                "Ejecuta la app con sudo o usa la CLI:\n  sudo netaudit --capture 100")
 
     def _snf_start(self):
         self.capture_pkts = []
         for i in self.ptree.get_children():
             self.ptree.delete(i)
-        self.snf_status.config(text="Capturando…", fg=ACC)
         self.q = queue.Queue()
         self.stop_event = threading.Event()
-        threading.Thread(target=self._snf_worker, args=(self.stop_event,), daemon=True).start()
+        if self.priv == "root":
+            self.snf_status.config(text="Capturando…", fg=ACC)
+            threading.Thread(target=self._snf_worker_direct, args=(self.stop_event,), daemon=True).start()
+        else:
+            self.snf_status.config(text="Solicitando permiso…", fg=WARN)
+            self._sentinel = sniff.stop_sentinel_path()
+            self._pcap_path = sniff.live_pcap_path()
+            threading.Thread(target=self._snf_worker_privileged, args=(self.stop_event,), daemon=True).start()
         self._poll_snf()
 
-    def _snf_worker(self, stop):
-        def on_pkt(p):
-            self.q.put(("pkt", p))
+    def _snf_worker_direct(self, stop):
         try:
-            sniff.capture(count=0, on_packet=on_pkt, stop_event=stop)
+            sniff.capture(count=0, on_packet=lambda p: self.q.put(("pkt", p)), stop_event=stop)
             self.q.put(("capdone", None))
-        except PermissionError as e:
+        except Exception as e:
             self.q.put(("caperror", str(e)))
+
+    def _snf_worker_privileged(self, stop):
+        try:
+            ok, err = sniff.start_privileged_capture(
+                sniff.default_iface(), self._pcap_path, self._sentinel)
+            if not ok:
+                self.q.put(("caperror", "Permiso cancelado" + (f": {err}" if err else "")))
+                return
+            self.q.put(("status", "Capturando…"))
+            sniff.read_pcap_stream(self._pcap_path, lambda p: self.q.put(("pkt", p)), stop)
+            self.q.put(("capdone", None))
         except Exception as e:
             self.q.put(("caperror", str(e)))
 
@@ -469,6 +523,9 @@ class App:
         try:
             while True:
                 kind, payload = self.q.get_nowait()
+                if kind == "status":
+                    self.snf_status.config(text=payload, fg=ACC)
+                    continue
                 if kind == "pkt":
                     p = payload
                     self.capture_pkts.append(p)
@@ -494,6 +551,10 @@ class App:
     def _snf_stop(self):
         if self.stop_event:
             self.stop_event.set()
+        # detener también la captura privilegiada (sin volver a pedir contraseña)
+        sentinel = getattr(self, "_sentinel", None)
+        if sentinel:
+            sniff.stop_privileged_capture(sentinel)
 
     def _snf_detail(self, _):
         sel = self.ptree.selection()
@@ -524,6 +585,20 @@ class App:
         if path:
             sniff.write_pcap(path, self.capture_pkts)
             messagebox.showinfo("Guardado", f"Guardado en:\n{path}\n\nÁbrelo en Wireshark.")
+
+    def _snf_pdf(self):
+        if not self.capture_pkts:
+            messagebox.showinfo("PDF", "No hay paquetes capturados.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".pdf",
+                                            filetypes=[("PDF", "*.pdf")],
+                                            initialfile="netaudit_captura.pdf")
+        if path:
+            try:
+                pdfx.pdf_capture_report(self.capture_pkts, path)
+                messagebox.showinfo("PDF", f"Guardado en:\n{path}")
+            except Exception as e:
+                messagebox.showerror("PDF", f"No se pudo crear el PDF:\n{e}")
 
 
 def main():

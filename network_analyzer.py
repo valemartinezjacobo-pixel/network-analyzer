@@ -39,7 +39,7 @@ redes ajenas puede ser ilegal en tu jurisdicción.
 ================================================================================
 """
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 import argparse
 import concurrent.futures
@@ -64,11 +64,15 @@ IS_WIN = platform.system().lower().startswith("win")
 IS_MAC = platform.system().lower() == "darwin"
 IS_LINUX = platform.system().lower() == "linux"
 
-# Sniffer (mini-Wireshark). Import explícito para que PyInstaller lo empaquete.
+# Sniffer (mini-Wireshark) y export PDF. Import explícito para PyInstaller.
 try:
     import netaudit_sniffer
 except Exception:
     netaudit_sniffer = None
+try:
+    import netaudit_pdf
+except Exception:
+    netaudit_pdf = None
 
 # Salida UTF-8 robusta: evita UnicodeEncodeError en consolas Windows (cp1252).
 for _stream in ("stdout", "stderr"):
@@ -1467,6 +1471,9 @@ def run_capture_cli(args):
     if args.pcap:
         sniff.write_pcap(args.pcap, pkts)
         print(f"   pcap: {os.path.abspath(args.pcap)}  (ábrelo en Wireshark)")
+    if args.pdf and netaudit_pdf:
+        netaudit_pdf.pdf_capture_report(pkts, args.pdf)
+        print(f"   PDF:  {os.path.abspath(args.pdf)}")
     print(C.g("   Listo. ✔\n"))
 
 
@@ -1498,6 +1505,7 @@ def main():
     ap.add_argument("--filter", default=None, help="filtro BPF para la captura, ej 'tcp port 443'")
     ap.add_argument("--pcap", default=None, help="guarda la captura en un .pcap (Wireshark)")
     ap.add_argument("--read-pcap", default=None, help="lee y diseca un .pcap existente")
+    ap.add_argument("--pdf", default=None, help="exporta el informe a PDF (auditoría o captura)")
     ap.add_argument("--wol", default=None, metavar="MAC", help="envía Wake-on-LAN a una MAC")
     args = ap.parse_args()
 
@@ -1616,11 +1624,14 @@ def main():
             json.dump(data, f, ensure_ascii=False, indent=2, default=str)
     if args.csv:
         export_csv(args.csv, data.get("lan", []))
+    if args.pdf and netaudit_pdf:
+        netaudit_pdf.pdf_audit_report(data, args.pdf)
 
     section("Reporte generado")
     print(f"   HTML: {os.path.abspath(args.output)}")
     if args.json: print(f"   JSON: {os.path.abspath(args.json)}")
     if args.csv:  print(f"   CSV:  {os.path.abspath(args.csv)}")
+    if args.pdf and netaudit_pdf:  print(f"   PDF:  {os.path.abspath(args.pdf)}")
     print(C.g("\n   Abre el HTML en tu navegador. ✔\n"))
 
 

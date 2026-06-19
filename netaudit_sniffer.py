@@ -16,6 +16,7 @@ Solo librería estándar de Python.
 
 import os
 import platform
+import re
 import socket
 import struct
 import subprocess
@@ -426,6 +427,113 @@ def can_capture():
 def shutil_which(name):
     import shutil
     return shutil.which(name) is not None
+
+
+# --------------------------------------------------------------------------- #
+# Elevación de privilegios con diálogo nativo (1 botón) + captura a fichero   #
+# --------------------------------------------------------------------------- #
+
+def is_root():
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def privileged_backend():
+    """Cómo capturar según el sistema:
+    'root'         -> ya somos root, captura directa sin pedir nada
+    'macos'        -> diálogo nativo de macOS (contraseña/Touch ID, 1 botón)
+    'linux-pkexec' -> diálogo gráfico de Linux (pkexec)
+    None           -> sin método disponible (usar CLI con sudo)"""
+    if is_root():
+        return "root"
+    if IS_MAC and shutil_which("tcpdump"):
+        return "macos"
+    if IS_LINUX and shutil_which("pkexec") and shutil_which("tcpdump"):
+        return "linux-pkexec"
+    return None
+
+
+def live_pcap_path():
+    import tempfile
+    return os.path.join(tempfile.gettempdir(), "netaudit_live.pcap")
+
+
+def stop_sentinel_path():
+    import tempfile
+    return os.path.join(tempfile.gettempdir(), "netaudit_stop")
+
+
+def start_privileged_capture(iface, pcap_path, sentinel_path, bpf=None):
+    """Lanza tcpdump como administrador en segundo plano, mostrando el diálogo
+    nativo del sistema (un solo botón). Devuelve (ok, mensaje_error).
+    La captura escribe en `pcap_path` hasta que aparezca `sentinel_path`."""
+    iface = iface or default_iface() or "en0"
+    for p in (pcap_path, sentinel_path):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    flt = ""
+    if bpf and re.match(r"^[\w\.\s]+$", bpf):  # solo filtros simples y seguros
+        flt = " " + bpf.strip()
+    inner = (f"tcpdump -i {iface} -U -s 65535 -n -w {pcap_path}{flt} & "
+             f"T=$!; while [ ! -f {sentinel_path} ]; do sleep 0.4; done; kill $T")
+    shell = f"nohup sh -c '{inner}' >/dev/null 2>&1 &"
+    try:
+        if IS_MAC:
+            apple = f'do shell script "{shell}" with administrator privileges'
+            r = subprocess.run(["osascript", "-e", apple], capture_output=True, text=True)
+            return r.returncode == 0, (r.stderr or "").strip()
+        if shutil_which("pkexec"):
+            r = subprocess.run(["pkexec", "sh", "-c", shell], capture_output=True, text=True)
+            return r.returncode == 0, (r.stderr or "").strip()
+    except Exception as e:
+        return False, str(e)
+    return False, "sin método de elevación disponible"
+
+
+def stop_privileged_capture(sentinel_path):
+    try:
+        open(sentinel_path, "w").close()
+        return True
+    except Exception:
+        return False
+
+
+def read_pcap_stream(path, on_packet, stop_event, ready_timeout=25):
+    """Lee un .pcap mientras se va escribiendo (captura en vivo a fichero)."""
+    t0 = time.time()
+    while not (os.path.exists(path) and os.path.getsize(path) >= 24):
+        if (stop_event and stop_event.is_set()) or time.time() - t0 > ready_timeout:
+            return
+        time.sleep(0.2)
+    f = open(path, "rb")
+    try:
+        gh = f.read(24)
+        magic = struct.unpack("<I", gh[:4])[0]
+        endian = "<" if magic == 0xA1B2C3D4 else ">"
+        link_type = struct.unpack(endian + "I", gh[20:24])[0]
+        n = 0
+        idle = 0.0
+        while not (stop_event and stop_event.is_set()):
+            pos = f.tell()
+            rh = f.read(16)
+            if len(rh) < 16:
+                f.seek(pos); time.sleep(0.2); idle += 0.2
+                if idle > 30:
+                    break
+                continue
+            sec, usec, caplen, _ = struct.unpack(endian + "IIII", rh)
+            data = f.read(caplen)
+            if len(data) < caplen:
+                f.seek(pos); time.sleep(0.2); continue
+            idle = 0.0
+            n += 1
+            pkt = parse_packet(data, link_type, ts=sec + usec / 1e6, number=n)
+            pkt["raw"] = data
+            if on_packet:
+                on_packet(pkt)
+    finally:
+        f.close()
 
 
 # --------------------------------------------------------------------------- #

@@ -140,6 +140,42 @@ class TestSniffer(unittest.TestCase):
                                        "proto": "TCP", "length": 60, "info": "x", "hex": "00"}])
         self.assertTrue(html.startswith("<!DOCTYPE"))
 
+    def test_privileged_backend(self):
+        import netaudit_sniffer as sn
+        # devuelve uno de los valores esperados sin lanzar
+        self.assertIn(sn.privileged_backend(), ("root", "macos", "linux-pkexec", None))
+
+    def test_live_pcap_stream(self):
+        import struct, socket, tempfile, threading, time, os
+        import netaudit_sniffer as sn
+
+        def frame(i):
+            tcp = struct.pack("!HHIIBBHHH", 1000 + i, 80, 0, 0, 0x50, 0x02, 0, 0, 0)
+            iph = (struct.pack("!BBHHHBBH", 0x45, 0, 20 + len(tcp), i, 0, 64, 6, 0) +
+                   socket.inet_aton("10.0.0.1") + socket.inet_aton("10.0.0.2"))
+            return bytes.fromhex("aabbccddeeff112233445566") + struct.pack("!H", 0x0800) + iph + tcp
+
+        path = tempfile.mktemp(suffix=".pcap")
+        stop = threading.Event()
+        got = []
+
+        def writer():
+            with open(path, "wb") as f:
+                f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)); f.flush()
+                for i in range(5):
+                    raw = frame(i); ts = time.time(); sec = int(ts); usec = int((ts - sec) * 1e6)
+                    f.write(struct.pack("<IIII", sec, usec, len(raw), len(raw))); f.write(raw); f.flush()
+                    time.sleep(0.15)
+            time.sleep(0.3); stop.set()
+
+        threading.Thread(target=writer, daemon=True).start()
+        sn.read_pcap_stream(path, lambda p: got.append(p), stop, ready_timeout=5)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        self.assertGreaterEqual(len(got), 4)
+
 
 class TestScannerExtras(unittest.TestCase):
     def test_wol_magic_packet(self):
@@ -155,6 +191,38 @@ class TestScannerExtras(unittest.TestCase):
         names = [a[0] for a in na.host_actions(h)]
         self.assertTrue(any("HTTP" in n for n in names))
         self.assertTrue(any("Wake" in n for n in names))
+
+
+class TestPDF(unittest.TestCase):
+    def _check(self, path):
+        import os
+        with open(path, "rb") as f:
+            b = f.read()
+        os.unlink(path)
+        self.assertTrue(b.startswith(b"%PDF-1.4"))
+        self.assertIn(b"%%EOF", b[-8:])
+        self.assertGreater(len(b), 800)
+
+    def test_pdf_audit(self):
+        import tempfile, netaudit_pdf as P
+        data = {"host": {"hostname": "x", "os": "Linux", "os_release": "6", "timestamp": "now"},
+                "interfaces": {"lo": {"ipv4": ["127.0.0.1"], "mac": None, "mtu": 65536}},
+                "lan": [{"ip": "192.168.1.5", "hostname": "h", "mac": "aa:bb:cc:dd:ee:ff",
+                         "vendor": "Apple", "os_guess": "Linux/Unix", "rtt_ms": 1.0,
+                         "ports": [{"port": 80, "service": "HTTP"}]}],
+                "public": {}, "connectivity": {}, "speedtest": {}}
+        data["security"] = na.security_score(data)
+        self._check(P.pdf_audit_report(data, tempfile.mktemp(suffix=".pdf")))
+
+    def test_pdf_scan_and_capture(self):
+        import tempfile, netaudit_pdf as P
+        hosts = [{"ip": "10.0.0.%d" % i, "hostname": "h%d" % i, "mac": "aa:bb:cc:dd:ee:%02x" % i,
+                  "vendor": "X", "os_guess": "Windows", "rtt_ms": 2.0,
+                  "ports": [{"port": 443, "service": "HTTPS"}]} for i in range(1, 8)]
+        self._check(P.pdf_scan_report(hosts, tempfile.mktemp(suffix=".pdf")))
+        pkts = [{"no": i, "time": 1700000000 + i, "src": "1.1.1.1", "dst": "2.2.2.2",
+                 "proto": "TCP", "length": 60, "info": "TCP %d" % i} for i in range(1, 30)]
+        self._check(P.pdf_capture_report(pkts, tempfile.mktemp(suffix=".pdf")))
 
 
 if __name__ == "__main__":
