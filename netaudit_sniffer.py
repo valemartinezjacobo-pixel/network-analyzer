@@ -21,6 +21,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 IS_WIN = platform.system().lower().startswith("win")
@@ -311,11 +312,50 @@ def read_pcap(path):
 # --------------------------------------------------------------------------- #
 
 def default_iface():
-    if IS_MAC:
-        return "en0"
-    if IS_LINUX:
-        return "any"
-    return None
+    """Interfaz de la ruta por defecto (la que de verdad tiene tráfico)."""
+    try:
+        if IS_MAC:
+            out = subprocess.run(["route", "-n", "get", "default"],
+                                 capture_output=True, text=True, timeout=4).stdout
+            m = re.search(r"interface:\s*(\w+)", out)
+            if m:
+                return m.group(1)
+            return "en0"
+        if IS_LINUX:
+            out = subprocess.run(["ip", "route", "get", "8.8.8.8"],
+                                 capture_output=True, text=True, timeout=4).stdout
+            m = re.search(r"dev\s+(\w+)", out)
+            if m:
+                return m.group(1)
+            return "any"
+    except Exception:
+        pass
+    return "en0" if IS_MAC else ("any" if IS_LINUX else None)
+
+
+def _tcpdump_bin():
+    for p in ("/usr/sbin/tcpdump", "/sbin/tcpdump"):
+        if os.path.exists(p):
+            return p
+    return "tcpdump"
+
+
+def cap_log_path():
+    if IS_WIN:
+        return os.path.join(tempfile.gettempdir(), "netaudit_capture.log")
+    return "/tmp/netaudit_capture.log"
+
+
+def get_capture_error():
+    """Devuelve el último error de tcpdump (para diagnóstico en la GUI)."""
+    try:
+        p = cap_log_path()
+        if os.path.exists(p):
+            t = open(p, encoding="latin-1", errors="replace").read().strip()
+            return t[-400:]
+    except Exception:
+        pass
+    return ""
 
 
 def _capture_afpacket(count, iface, on_packet, stop_event, duration):
@@ -445,21 +485,23 @@ def privileged_backend():
     None           -> sin método disponible (usar CLI con sudo)"""
     if is_root():
         return "root"
-    if IS_MAC and shutil_which("tcpdump"):
+    if IS_MAC and (os.path.exists("/usr/sbin/tcpdump") or shutil_which("tcpdump")):
         return "macos"
-    if IS_LINUX and shutil_which("pkexec") and shutil_which("tcpdump"):
+    if IS_LINUX and shutil_which("pkexec") and (shutil_which("tcpdump") or os.path.exists("/usr/sbin/tcpdump")):
         return "linux-pkexec"
     return None
 
 
 def live_pcap_path():
-    import tempfile
-    return os.path.join(tempfile.gettempdir(), "netaudit_live.pcap")
+    if IS_WIN:
+        return os.path.join(tempfile.gettempdir(), "netaudit_live.pcap")
+    return "/tmp/netaudit_live.pcap"
 
 
 def stop_sentinel_path():
-    import tempfile
-    return os.path.join(tempfile.gettempdir(), "netaudit_stop")
+    if IS_WIN:
+        return os.path.join(tempfile.gettempdir(), "netaudit_stop")
+    return "/tmp/netaudit_stop"
 
 
 def start_privileged_capture(iface, pcap_path, sentinel_path, bpf=None):
@@ -467,7 +509,8 @@ def start_privileged_capture(iface, pcap_path, sentinel_path, bpf=None):
     nativo del sistema (un solo botón). Devuelve (ok, mensaje_error).
     La captura escribe en `pcap_path` hasta que aparezca `sentinel_path`."""
     iface = iface or default_iface() or "en0"
-    for p in (pcap_path, sentinel_path):
+    log = cap_log_path()
+    for p in (pcap_path, sentinel_path, log):
         try:
             os.remove(p)
         except OSError:
@@ -475,9 +518,13 @@ def start_privileged_capture(iface, pcap_path, sentinel_path, bpf=None):
     flt = ""
     if bpf and re.match(r"^[\w\.\s]+$", bpf):  # solo filtros simples y seguros
         flt = " " + bpf.strip()
-    inner = (f"tcpdump -i {iface} -U -s 65535 -n -w {pcap_path}{flt} & "
-             f"T=$!; while [ ! -f {sentinel_path} ]; do sleep 0.4; done; kill $T")
-    shell = f"nohup sh -c '{inner}' >/dev/null 2>&1 &"
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+    zflag = f" -Z {user}" if re.match(r"^[\w.\-]+$", user or "") else ""
+    tcp = _tcpdump_bin()
+    # tcpdump escribe el pcap (legible por el usuario gracias a -Z) y su stderr al log
+    inner = (f"{tcp} -i {iface}{zflag} -U -s 65535 -n -w {pcap_path}{flt} 2>{log} & "
+             f"T=$!; while [ ! -f {sentinel_path} ]; do sleep 0.4; done; kill $T 2>/dev/null")
+    shell = f"nohup sh -c '{inner}' </dev/null >/dev/null 2>&1 &"
     try:
         if IS_MAC:
             apple = f'do shell script "{shell}" with administrator privileges'
@@ -499,7 +546,7 @@ def stop_privileged_capture(sentinel_path):
         return False
 
 
-def read_pcap_stream(path, on_packet, stop_event, ready_timeout=25):
+def read_pcap_stream(path, on_packet, stop_event, ready_timeout=14):
     """Lee un .pcap mientras se va escribiendo (captura en vivo a fichero)."""
     t0 = time.time()
     while not (os.path.exists(path) and os.path.getsize(path) >= 24):

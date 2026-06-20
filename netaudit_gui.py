@@ -538,15 +538,33 @@ class App:
                     if len(self.capture_pkts) > 2000:
                         self.stop_event and self.stop_event.set()
                 elif kind == "capdone":
-                    self.snf_status.config(text=f"Detenido · {len(self.capture_pkts)} paquetes", fg=ACC2); return
+                    self._snf_finish(); return
                 elif kind == "caperror":
-                    self.snf_status.config(text="Error: "+payload, fg=BAD); return
+                    self.snf_status.config(text="Error: " + payload, fg=BAD); return
         except queue.Empty:
             pass
         if self.stop_event and not self.stop_event.is_set():
             self.root.after(120, self._poll_snf)
         else:
-            self.snf_status.config(text=f"Detenido · {len(self.capture_pkts)} paquetes", fg=ACC2)
+            self._snf_finish()
+
+    def _snf_finish(self):
+        n = len(self.capture_pkts)
+        if n == 0:
+            err = ""
+            try:
+                err = sniff.get_capture_error()
+            except Exception:
+                pass
+            last = err.strip().splitlines()[-1] if err.strip() else ""
+            self.snf_status.config(
+                text="Sin paquetes. " + (last or "Prueba otra interfaz o revisa el permiso."),
+                fg=WARN)
+            if last:
+                messagebox.showwarning("Captura", "No se capturaron paquetes.\n\n"
+                                       f"tcpdump dijo:\n{err.strip()[-400:]}")
+        else:
+            self.snf_status.config(text=f"Detenido · {n} paquetes", fg=ACC2)
 
     def _snf_stop(self):
         if self.stop_event:
