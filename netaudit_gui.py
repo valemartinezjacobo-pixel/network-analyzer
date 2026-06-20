@@ -446,7 +446,7 @@ class App:
         if self.priv == "root":
             txt, ok = "Listo · captura directa", True
         elif self.priv in ("macos", "linux-pkexec"):
-            txt, ok = "Pulsa ▶ Iniciar (pedirá tu contraseña una vez)", True
+            txt, ok = "Pulsa ▶ Iniciar · pide contraseña y captura ~1000 paquetes", True
         else:
             txt, ok = "Sin backend de captura (usa: sudo netaudit --capture)", False
         self.snf_status = tk.Label(bar, text=txt, bg=BG,
@@ -508,13 +508,22 @@ class App:
 
     def _snf_worker_privileged(self, stop):
         try:
-            ok, err = sniff.start_privileged_capture(
-                sniff.default_iface(), self._pcap_path, self._sentinel)
-            if not ok:
-                self.q.put(("caperror", "Permiso cancelado" + (f": {err}" if err else "")))
+            pcap = self._pcap_path
+            # Lector en vivo: espera a que aparezca el fichero (incluye el tiempo
+            # que tardes en escribir la contraseña) y va mostrando los paquetes.
+            reader = threading.Thread(
+                target=lambda: sniff.read_pcap_stream(
+                    pcap, lambda p: self.q.put(("pkt", p)), stop, ready_timeout=180),
+                daemon=True)
+            reader.start()
+            self.q.put(("status", "Permiso + capturando ~1000 paquetes…"))
+            # SÍNCRONO: bloquea durante la captura (tcpdump en primer plano).
+            ok, err = sniff.run_privileged_capture_sync(sniff.default_iface(), pcap, count=1000)
+            stop.set()
+            captured = os.path.exists(pcap) and os.path.getsize(pcap) > 24
+            if not ok and not captured:
+                self.q.put(("caperror", err or "permiso cancelado o sin captura"))
                 return
-            self.q.put(("status", "Capturando…"))
-            sniff.read_pcap_stream(self._pcap_path, lambda p: self.q.put(("pkt", p)), stop)
             self.q.put(("capdone", None))
         except Exception as e:
             self.q.put(("caperror", str(e)))

@@ -546,6 +546,39 @@ def stop_privileged_capture(sentinel_path):
         return False
 
 
+def run_privileged_capture_sync(iface, pcap_path, count=1000, bpf=None):
+    """Captura SÍNCRONA y robusta: tcpdump corre en primer plano bajo el diálogo
+    nativo (sin '&', que macOS mataba). Bloquea hasta capturar `count` paquetes;
+    mientras tanto, otro hilo va leyendo el .pcap en vivo. Devuelve (ok, error)."""
+    iface = iface or default_iface() or "en0"
+    log = cap_log_path()
+    for p in (pcap_path, log):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    flt = ""
+    if bpf and re.match(r"^[\w\.\s]+$", bpf):
+        flt = " " + bpf.strip()
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+    zflag = f" -Z {user}" if re.match(r"^[\w.\-]+$", user or "") else ""
+    tcp = _tcpdump_bin()
+    inner = f"{tcp} -i {iface}{zflag} -U -s 65535 -n -c {count} -w {pcap_path}{flt} 2>{log}"
+    try:
+        if IS_MAC:
+            apple = f'do shell script "{inner}" with administrator privileges'
+            r = subprocess.run(["osascript", "-e", apple], capture_output=True, text=True)
+            err = (r.stderr or "").strip() or get_capture_error()
+            return r.returncode == 0, err
+        if shutil_which("pkexec"):
+            r = subprocess.run(["pkexec", "sh", "-c", inner], capture_output=True, text=True)
+            err = (r.stderr or "").strip() or get_capture_error()
+            return r.returncode == 0, err
+    except Exception as e:
+        return False, str(e)
+    return False, "sin método de elevación disponible"
+
+
 def read_pcap_stream(path, on_packet, stop_event, ready_timeout=14):
     """Lee un .pcap mientras se va escribiendo (captura en vivo a fichero)."""
     t0 = time.time()
