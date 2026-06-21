@@ -71,7 +71,10 @@ mapa de geolocalización, gauge de seguridad y exportación a CSV desde el naveg
 
 ## Herramientas incluidas (la app tiene 3 modos)
 
-La aplicación de escritorio reúne tres herramientas:
+La aplicación de escritorio usa una **interfaz Qt (PySide6)** moderna y limpia,
+con estilo macOS y fondo con motivo de red LAN, en Mac, Windows y Linux. El
+escáner detecta la **máscara de red real** de tu interfaz (p. ej. /22), no asume
+/24. Reúne tres herramientas:
 
 1. **Análisis de red** — la auditoría completa descrita arriba + dashboard HTML.
 2. **Escáner de red** (estilo *Advanced IP Scanner*) — descubre los hosts de la LAN en una tabla en vivo (IP, nombre, MAC, fabricante, SO, puertos) con **Wake-on-LAN**, detección de carpetas compartidas **SMB** y acciones rápidas (abrir web/FTP/RDP/VNC).

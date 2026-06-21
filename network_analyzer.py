@@ -39,7 +39,7 @@ redes ajenas puede ser ilegal en tu jurisdicción.
 ================================================================================
 """
 
-__version__ = "2.2.2"
+__version__ = "2.3.0"
 
 import argparse
 import concurrent.futures
@@ -537,7 +537,53 @@ def collect_public(fast=False):
 # 6. Escaneo de la LAN (ping sweep + TTL fingerprint)                         #
 # --------------------------------------------------------------------------- #
 
-def guess_subnet(target=None):
+def local_cidr():
+    """Red real (IP + prefijo) de la interfaz principal — NO asume /24.
+    Lee la máscara real: CIDR en Linux, netmask hex en macOS, máscara en Windows."""
+    ip = primary_ip()
+    if ip == "127.0.0.1":
+        return None
+    prefix = None
+    try:
+        if IS_LINUX and have("ip"):
+            out = run(["ip", "-o", "-f", "inet", "addr", "show"])
+            m = re.search(re.escape(ip) + r"/(\d+)", out)
+            if m:
+                prefix = int(m.group(1))
+        elif IS_MAC or have("ifconfig"):
+            out = run(["ifconfig"])
+            m = re.search(r"inet " + re.escape(ip) + r" netmask (0x[0-9a-fA-F]+)", out)
+            if m:
+                prefix = bin(int(m.group(1), 16)).count("1")
+            else:  # algunos ifconfig muestran "netmask 255.255.252.0"
+                m2 = re.search(r"inet " + re.escape(ip) + r"\s+netmask\s+(\d+\.\d+\.\d+\.\d+)", out)
+                if m2:
+                    prefix = sum(bin(int(o)).count("1") for o in m2.group(1).split("."))
+        elif IS_WIN:
+            out = run("ipconfig", timeout=10)
+            lines = out.splitlines()
+            for i, line in enumerate(lines):
+                if ip in line:
+                    for j in range(i, min(i + 4, len(lines))):
+                        if "Mask" in lines[j] or "scara" in lines[j].lower():
+                            mm = re.search(r"(\d+\.\d+\.\d+\.\d+)", lines[j])
+                            if mm:
+                                prefix = sum(bin(int(o)).count("1") for o in mm.group(1).split("."))
+                                break
+                    break
+    except Exception:
+        pass
+    if not prefix or prefix < 1 or prefix > 32:
+        prefix = 24
+    try:
+        return ipaddress.ip_network(f"{ip}/{prefix}", strict=False)
+    except Exception:
+        return None
+
+
+def guess_subnet(target=None, max_hosts=8192):
+    """Devuelve la red a escanear. Sin objetivo, usa la MÁSCARA REAL de tu red
+    (p. ej. /22). Redes enormes (/16, /8) se recortan por seguridad."""
     if target:
         try:
             if "/" in target:
@@ -545,10 +591,21 @@ def guess_subnet(target=None):
             return ipaddress.ip_network(target + "/24", strict=False)
         except Exception:
             pass
-    try:
-        return ipaddress.ip_network(primary_ip() + "/24", strict=False)
-    except Exception:
-        return None
+    net = local_cidr()
+    if net is None:
+        try:
+            net = ipaddress.ip_network(primary_ip() + "/24", strict=False)
+        except Exception:
+            return None
+    # Tope de seguridad: no barrer redes gigantes por accidente.
+    if net.num_addresses > max_hosts:
+        import math
+        new_prefix = 32 - int(math.log2(max_hosts))
+        try:
+            net = ipaddress.ip_network(f"{primary_ip()}/{new_prefix}", strict=False)
+        except Exception:
+            pass
+    return net
 
 def os_from_ttl(ttl):
     if ttl is None: return None
